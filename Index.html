@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Rastreador GPS com Bing Maps</title>
+  <style>
+    #map {
+      width: 100%;
+      height: 600px;
+    }
+    #controls {
+      margin: 10px 0;
+      padding: 10px;
+      background-color: #f5f5f5;
+      border-radius: 5px;
+    }
+    #infobox {
+      max-width: 200px;
+      padding: 10px;
+      background-color: #ffffff;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+    #status {
+      margin-top: 10px;
+      padding: 5px;
+      font-weight: bold;
+    }
+    .connected {
+      color: green;
+    }
+    .disconnected {
+      color: red;
+    }
+  </style>
+</head>
+<body>
+
+
+  <div id="controls">
+    <label>
+      <input type="checkbox" id="toggleTrail" checked />
+      Habilitar rastro
+    </label>
+    <label>
+      <input type="checkbox" id="toggleAutoUpdate" checked />
+      Atualização automática
+    </label><br><br>
+    <label>Channel ID:
+      <input type="text" id="channelId" placeholder="Ex: 2914533" />
+    </label><br>
+    <label>API Key de Leitura:
+      <input type="text" id="apiKey" placeholder="Ex: REYM6SWM97NOE6TQ" />
+    </label><br>
+    <label>Campo de Latitude:
+      <input type="text" id="fieldLat" placeholder="Ex: field4" />
+    </label><br>
+    <label>Campo de Longitude:
+      <input type="text" id="fieldLon" placeholder="Ex: field5" />
+    </label><br><br>
+    <button onclick="startAutoUpdate()">Iniciar Monitoramento</button>
+    <button onclick="stopAutoUpdate()">Parar Monitoramento</button>
+    <div id="status">Status: Não conectado</div>
+    <div id="lastUpdate">Última atualização: Nunca</div>
+  </div>
+
+
+  <div id="map"></div>
+
+
+  <script>
+    var map, pin, infobox;
+    var locationHistory = [];
+    var trailEnabled = true;
+    var autoUpdateEnabled = true;
+    var updateInterval = 15000; // 15 segundos
+    var updateTimer = null;
+    var currentPolyline = null;
+
+
+    function initMap() {
+      map = new Microsoft.Maps.Map(document.getElementById('map'), {
+        credentials: 'Aj0F3zyFZrgdzKWlTPU40IOWaAI1s8I3PJi3zZEF0lXLgS3ZJq_sdKKtwy3CjM5U',
+        center: new Microsoft.Maps.Location(-3.769946, -38.479756),
+        zoom: 15
+      });
+
+
+      pin = new Microsoft.Maps.Pushpin(map.getCenter(), {
+        color: 'red',
+        title: 'Posição atual'
+      });
+      map.entities.push(pin);
+
+
+      infobox = new Microsoft.Maps.Infobox(pin.getLocation(), {
+        visible: false,
+        maxWidth: 250
+      });
+      infobox.setMap(map);
+      document.getElementById('toggleTrail').addEventListener('change', function() {
+        trailEnabled = this.checked;
+      });
+
+
+      document.getElementById('toggleAutoUpdate').addEventListener('change', function() {
+        autoUpdateEnabled = this.checked;
+        if (autoUpdateEnabled && updateTimer === null) {
+          startAutoUpdate();
+        } else if (!autoUpdateEnabled) {
+          stopAutoUpdate();
+        }
+      });
+    }
+
+
+    function fetchLocationFromThingSpeak() {
+      const channelId = document.getElementById('channelId').value.trim();
+      const apiKey = document.getElementById('apiKey').value.trim();
+      const fieldLat = document.getElementById('fieldLat').value.trim();
+      const fieldLon = document.getElementById('fieldLon').value.trim();
+
+
+      if (!channelId || !fieldLat || !fieldLon) {
+        updateStatus('Preencha todos os campos obrigatórios', 'disconnected');
+        return;
+      }
+
+
+      const url = `https://api.thingspeak.com/channels/${channelId}/feeds.json?api_key=${apiKey}&results=1`;
+
+
+      updateStatus('Conectando ao ThingSpeak...', 'connecting');
+     
+      fetch(url)
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Erro na requisição');
+          }
+          return response.json();
+        })
+        .then(data => {
+          if (!data || !data.feeds || data.feeds.length === 0) {
+            updateStatus('Nenhum dado encontrado', 'disconnected');
+            return;
+          }
+
+
+          const feed = data.feeds[0];
+          const lat = parseFloat(feed[fieldLat]);
+          const lon = parseFloat(feed[fieldLon]);
+
+
+       
+          if (isNaN(lat) || isNaN(lon)) {
+            updateStatus('Dados inválidos', 'disconnected');
+            return;
+          }
+
+
+          updateMapLocation(lat, lon);
+          updateStatus('Conectado - Atualizando automaticamente', 'connected');
+          document.getElementById('lastUpdate').textContent = `Última atualização: ${new Date().toLocaleTimeString()}`;
+        })
+        .catch(error => {
+          console.error("Erro ao consultar ThingSpeak:", error);
+          updateStatus('Erro de conexão', 'disconnected');
+        });
+    }
+
+
+    function updateMapLocation(lat, lon) {
+      const location = new Microsoft.Maps.Location(lat, lon);
+     
+      // Mover marcador
+      pin.setLocation(location);
+     
+      // Centralizar mapa
+      map.setView({ center: location, animate: true });
+     
+      // Atualizar histórico de localização
+      if (trailEnabled) {
+        locationHistory.push(location);
+       
+        // Remover polyline anterior se existir
+        if (currentPolyline) {
+          map.entities.remove(currentPolyline);
+        }
+       
+        // Criar nova polyline com todo o histórico
+        currentPolyline = new Microsoft.Maps.Polyline(locationHistory, {
+          strokeColor: 'blue',
+          strokeThickness: 3
+        });
+        map.entities.push(currentPolyline);
+      } else {
+        locationHistory = [location]; // Resetar histórico
+      }
+
+
+      // Atualizar infobox
+      const infoContent = `<div id="infobox">
+        <b>Última Localização:</b><br>
+        Latitude: ${lat.toFixed(6)}<br>
+        Longitude: ${lon.toFixed(6)}<br>
+        <small>Atualizado em: ${new Date().toLocaleTimeString()}</small>
+      </div>`;
+     
+      infobox.setOptions({
+        visible: true,
+        title: 'Localização Atual',
+        description: infoContent
+      });
+      infobox.setLocation(location);
+    }
+
+
+    function startAutoUpdate() {
+      // Verificar se já está rodando
+      if (updateTimer !== null) {
+        return;
+      }
+     
+      // Fazer a primeira atualização imediatamente
+      fetchLocationFromThingSpeak();
+     
+      // Configurar o intervalo
+      updateTimer = setInterval(fetchLocationFromThingSpeak, updateInterval);
+      document.getElementById('toggleAutoUpdate').checked = true;
+      autoUpdateEnabled = true;
+    }
+
+
+    function stopAutoUpdate() {
+      if (updateTimer !== null) {
+        clearInterval(updateTimer);
+        updateTimer = null;
+      }
+      document.getElementById('toggleAutoUpdate').checked = false;
+      autoUpdateEnabled = false;
+      updateStatus('Conectado - Atualização manual', 'connected');
+    }
+
+
+    function updateStatus(message, status) {
+      const statusElement = document.getElementById('status');
+      statusElement.textContent = `Status: ${message}`;
+      statusElement.className = status;
+    }
+
+
+    // Inicializar o mapa quando a página carregar
+    (function() {
+      var script = document.createElement("script");
+      script.type = "text/javascript";
+      script.src = "https://www.bing.com/api/maps/mapcontrol?callback=initMap";
+      document.body.appendChild(script);
+    })();
+  </script>
+
+
+</body>
+</html>
